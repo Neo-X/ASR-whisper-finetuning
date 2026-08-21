@@ -2,7 +2,6 @@
 import argparse
 import sys
 from train import train
-from eval import eval
 
 def main():
     parser = argparse.ArgumentParser(
@@ -25,24 +24,28 @@ def main():
     train_parser.add_argument("--debug", action='store_true', help="Run in debug mode (use a small subset of the data)")
     train_parser.add_argument("--debug_subset_size", type=int, default=24, help="Number of samples to use in debug mode")
     train_parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    train_parser.add_argument("--auth_token", type=str, default="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", help="Huggingface authentication token for specific datasets like CommonVoice")
+    train_parser.add_argument("--auth_token", type=str, default="", help="Huggingface authentication token for specific datasets like CommonVoice")
 
     # Sub-parser for evaluation
     eval_parser = subparsers.add_parser("eval", help="Evaluate LoRA fine-tuned Whisper model")
     eval_parser.add_argument("--dataset_name", type=str, default='google/fleurs', help="Name of the Huggingface dataset")
     eval_parser.add_argument("--language", type=str, default='fr_fr', help="Language selection, e.g., 'fr_fr' or 'fr'")
+    eval_parser.add_argument("--split", type=str, default='test', help="Dataset split to evaluate on")
     eval_parser.add_argument("--batch_size", type=int, default=4)
     eval_parser.add_argument("--model_dir", type=str, default="./whisper-fr-LoRA", help="Directory containing the saved model")
     eval_parser.add_argument("--max_input_length", type=float, default=8, help="Max length of input audio (in seconds)")
     eval_parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for data loading")
-    eval_parser.add_argument("--auth_token", type=str, default="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", help="Huggingface authentication token for specific datasets like CommonVoice")
+    eval_parser.add_argument("--prompt_language", type=str, default='french', help="Language name forced in the decoder prompt (must match training)")
+    eval_parser.add_argument("--num_beams", type=int, default=5, help="Number of beams for inference")
+    eval_parser.add_argument("--auth_token", type=str, default="", help="Huggingface authentication token for specific datasets like CommonVoice")
 
     args = parser.parse_args() 
 
     if args.command == "train":
         train(args)
     elif args.command == "eval":
-        eval(args)
+        from eval import evaluate_model
+        evaluate_model(args)
     else:
         parser.print_help()
         sys.exit(1)

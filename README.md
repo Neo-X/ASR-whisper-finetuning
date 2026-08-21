@@ -2,6 +2,8 @@
 
 This repository contains scripts for fine-tuning the distilled [Whisper-large-v3](https://huggingface.co/distil-whisper/distil-large-v3) model on a specific language using Low-Rank Adaptation (LoRA) and evaluating the fine-tuned model. The scripts are optimized to run efficiently on GPUs and are designed to function without the need to produce a final trained model.
 
+colab example: https://colab.research.google.com/github/sanchit-gandhi/notebooks/blob/main/fine_tune_whisper.ipynb
+
 ## Table of Contents
 
 - [Objectives](#objectives)

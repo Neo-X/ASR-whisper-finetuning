@@ -70,7 +70,8 @@ def load_and_prepare_datasets(args, processor):
     """
     logging.info("Loading dataset...")
 
-    login(token=args.auth_token)
+    if args.auth_token:
+        login(token=args.auth_token)
 
     datasets = {}
     datasets["train"] = load_dataset(
