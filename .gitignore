@@ -1,3 +1,10 @@
 
 .DS_Store
 .venv
+.venv-rocm
+__pycache__/
+*.log
+
+# Personal dictation recordings (private voice data and dictated text)
+data/dictation/
+data/dictation-results/
