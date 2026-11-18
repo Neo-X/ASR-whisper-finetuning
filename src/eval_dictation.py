@@ -11,6 +11,9 @@ Two numbers are reported:
                        optionally + a LoRA adapter, with dictate.py's prompt
               granite  ibm-granite/granite-speech-4.1-2b, optional --keywords biasing
               cohere   CohereLabs/cohere-transcribe-03-2026
+              qwen3    Qwen/Qwen3-ASR-1.7B-hf, optional --keywords as context/hotwords
+              parakeet nvidia/parakeet-tdt-0.6b-v3
+              kyutai   kyutai/stt-2.6b-en-trfs
             The whisper number is the one a fine-tuned model has to beat.
 
 Speed is reported as RTF (processing time / audio duration, lower is faster),
@@ -50,6 +53,9 @@ DEFAULT_MODELS = {
     "whisper": "openai/whisper-large-v3-turbo",
     "granite": "ibm-granite/granite-speech-4.1-2b",
     "cohere": "CohereLabs/cohere-transcribe-03-2026",
+    "qwen3": "Qwen/Qwen3-ASR-1.7B-hf",
+    "parakeet": "nvidia/parakeet-tdt-0.6b-v3",
+    "kyutai": "kyutai/stt-2.6b-en-trfs",
 }
 
 
@@ -63,6 +69,8 @@ def load_dictation_dataset(args):
         dataset = dataset.filter(lambda r: r["split"] == args.split)
     if args.tag:
         dataset = dataset.filter(lambda r: r["tag"] == args.tag)
+    if args.limit:
+        dataset = dataset.select(range(min(args.limit, len(dataset))))
     return dataset.cast_column("audio", Audio(sampling_rate=SAMPLING_RATE))
 
 
@@ -124,6 +132,8 @@ def load_whisper(args, device):
             inputs = processor(sample["audio"]["array"], sampling_rate=SAMPLING_RATE,
                                return_tensors="pt", return_attention_mask=True)
         gen_kwargs = dict(language="english", task="transcribe", num_beams=args.num_beams, do_sample=False)
+        if inputs.input_features.shape[-1] > 3000:
+            gen_kwargs["return_timestamps"] = True  # required for long-form (> 30 s) decoding
         if prompt:
             gen_kwargs["prompt_ids"] = processor.get_prompt_ids(prompt, return_tensors="pt").to(device)
         with torch.no_grad():
@@ -196,7 +206,70 @@ def load_cohere(args, device):
     return transcribe
 
 
-BACKENDS = {"whisper": load_whisper, "granite": load_granite, "cohere": load_cohere}
+def load_qwen3(args, device):
+    """Qwen3-ASR (speech LLM); --keywords go in the system prompt as context/hotwords."""
+    import torch
+    from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration
+
+    processor = AutoProcessor.from_pretrained(args.model_name)
+    model = Qwen3ASRForConditionalGeneration.from_pretrained(
+        args.model_name, device_map=device, dtype=torch.bfloat16
+    ).eval()
+
+    def transcribe(sample):
+        audio = sample["audio"]["array"]
+        inputs = processor.apply_transcription_request(audio, language="English", prompt=args.keywords or None)
+        inputs = inputs.to(model.device, dtype=model.dtype)
+        max_new_tokens = max(256, int(5 * len(audio) / SAMPLING_RATE))
+        with torch.no_grad():
+            ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, num_beams=args.num_beams)
+        new_tokens = ids[:, inputs["input_ids"].shape[-1]:]
+        return processor.decode(new_tokens[0], return_format="transcription_only").strip()
+
+    return transcribe
+
+
+def load_parakeet(args, device):
+    """NVIDIA Parakeet TDT (transducer, no prompting)."""
+    import torch
+    from transformers import AutoModelForCTC, AutoProcessor, ParakeetForTDT
+
+    processor = AutoProcessor.from_pretrained(args.model_name)
+    cls = AutoModelForCTC if "ctc" in args.model_name else ParakeetForTDT
+    model = cls.from_pretrained(args.model_name, device_map=device).eval()
+
+    def transcribe(sample):
+        inputs = processor(sample["audio"]["array"], sampling_rate=SAMPLING_RATE, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(**inputs)
+        ids = out.sequences if hasattr(out, "sequences") else out
+        return processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+
+    return transcribe
+
+
+def load_kyutai(args, device):
+    """Kyutai STT (streaming decoder-only); expects 24 kHz audio."""
+    import librosa
+    import torch
+    from transformers import KyutaiSpeechToTextForConditionalGeneration, KyutaiSpeechToTextProcessor
+
+    processor = KyutaiSpeechToTextProcessor.from_pretrained(args.model_name)
+    model = KyutaiSpeechToTextForConditionalGeneration.from_pretrained(args.model_name, device_map=device).eval()
+    sr = processor.feature_extractor.sampling_rate
+
+    def transcribe(sample):
+        audio = librosa.resample(sample["audio"]["array"], orig_sr=SAMPLING_RATE, target_sr=sr)
+        inputs = processor(audio=audio, sampling_rate=sr, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            ids = model.generate(**inputs)
+        return processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+
+    return transcribe
+
+
+BACKENDS = {"whisper": load_whisper, "granite": load_granite, "cohere": load_cohere,
+            "qwen3": load_qwen3, "parakeet": load_parakeet, "kyutai": load_kyutai}
 
 
 def transcribe_with_model(args, dataset):
@@ -251,7 +324,7 @@ def main(args):
     if not args.skip_model:
         model_preds, model_seconds = transcribe_with_model(args, dataset)
         label = args.model_name + (f" + {args.lora_dir}" if args.lora_dir else "")
-        if args.keywords and args.backend == "granite":
+        if args.keywords and args.backend in ("granite", "qwen3"):
             label += f", keywords: {args.keywords}"
         _, norm_model = report(f"model ({label})", references, model_preds, tags, normalize)
         audio_seconds = sum(dataset["duration_s"])
@@ -289,7 +362,8 @@ def main(args):
     # Kept outside dataset_dir so result files aren't picked up as dataset metadata.
     results_dir = os.path.join(os.path.dirname(os.path.abspath(args.dataset_dir)), "dictation-results")
     os.makedirs(results_dir, exist_ok=True)
-    out_path = os.path.join(results_dir, f"eval_{time.strftime('%Y%m%d_%H%M%S')}_{args.backend if not args.skip_model else 'recorded'}.jsonl")
+    run_name = args.tag_name or (args.backend if not args.skip_model else "recorded")
+    out_path = os.path.join(results_dir, f"eval_{time.strftime('%Y%m%d_%H%M%S')}_{run_name}.jsonl")
     with open(out_path, "w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -307,7 +381,9 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default=None,
                         help="whisper: initial prompt; defaults to the one dictate.py used for each clip ('' for none)")
     parser.add_argument("--keywords", type=str, default=None,
-                        help="granite: comma-separated keywords for biasing, e.g. 'Asana, RLC, LoRA'")
+                        help="granite/qwen3: comma-separated keywords for biasing, e.g. 'Asana, RLC, LoRA'")
+    parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N clips (smoke tests)")
+    parser.add_argument("--tag_name", type=str, default=None, help="Run name used in the results file name (default: backend)")
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--skip_model", action="store_true", help="Only report the recorded-hypothesis WER")
     args = parser.parse_args()

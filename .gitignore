@@ -8,3 +8,4 @@ __pycache__/
 # Personal dictation recordings (private voice data and dictated text)
 data/dictation/
 data/dictation-results/
+data/dictation-vocab.txt
